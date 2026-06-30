@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Definition Schema",
+  "type": "object",
+  "required": ["agent_id", "owner", "description", "status", "model", "system_prompt"],
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,63}$",
+      "description": "Lowercase, hyphenated, must match the parent directory name."
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Person accountable for this agent's behavior, not just who wrote it."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 10
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "approved", "active", "deprecated"]
+    },
+    "model": {
+      "type": "object",
+      "required": ["provider", "name"],
+      "properties": {
+        "provider": { "type": "string", "enum": ["litellm"] },
+        "name": { "type": "string", "minLength": 1 },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 1 },
+        "max_tokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "system_prompt": {
+      "type": "string",
+      "minLength": 20,
+      "description": "Must be non-trivial; empty or placeholder prompts fail review intent."
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["mcp", "code_execution", "web_search"] },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "knowledge": {
+      "type": "array"
+    },
+    "human_approval_required": {
+      "type": "boolean",
+      "description": "Must be true for any agent whose tools can take an external action (write, send, execute), not just read."
+    }
+  },
+  "additionalProperties": false
+}

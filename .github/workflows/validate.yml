@@ -1,0 +1,77 @@
+name: Agent Definition Validation & Promotion
+
+on:
+  pull_request:
+    paths:
+      - 'agents/**/agent.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'agents/**/agent.yaml'
+
+jobs:
+  validate:
+    # Runs on every PR. This is the gate -- a failing run here should
+    # be configured as a required status check in branch protection,
+    # so a PR literally cannot be merged while validation fails.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install pyyaml jsonschema
+      - name: Validate changed agent definitions
+        run: python3 scripts/validate.py
+
+  promote:
+    # Runs only on merge to main, i.e. after PR review/approval has
+    # already happened (branch protection should require at least
+    # one approving review before merge is even possible). This job
+    # records the promotion -- it does not deploy anything.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: []
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # need the previous commit to diff against
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install psycopg2-binary
+
+      - name: Determine which agents changed in this push
+        id: changed
+        run: |
+          git diff --name-only HEAD~1 HEAD -- 'agents/**/agent.yaml' \
+            | sed -E 's#agents/([^/]+)/agent.yaml#\1#' > changed_agents.txt
+          cat changed_agents.txt
+
+      - name: Identify approver from the merged PR
+        id: approver
+        # GitHub's merge commit author is often a bot/the merger, not the
+        # reviewer who approved. For a real GxP-credible record, query the
+        # PR's review list via the GitHub API instead of trusting the
+        # commit author field. This step is intentionally left as a
+        # placeholder -- wire it to `gh api` against the PR associated
+        # with this merge commit before relying on this in anything beyond
+        # a prototype.
+        run: echo "approver=REPLACE_WITH_GH_API_REVIEWER_LOOKUP" >> "$GITHUB_OUTPUT"
+
+      - name: Promote each changed agent
+        env:
+          AUDIT_DB_HOST: ${{ secrets.AUDIT_DB_HOST }}
+          AUDIT_DB_PORT: ${{ secrets.AUDIT_DB_PORT }}
+          AUDIT_DB_NAME: ${{ secrets.AUDIT_DB_NAME }}
+          AUDIT_DB_USER: ${{ secrets.AUDIT_DB_USER }}
+          AUDIT_DB_PASSWORD: ${{ secrets.AUDIT_DB_PASSWORD }}
+        run: |
+          while read -r agent_id; do
+            if [ -n "$agent_id" ]; then
+              python3 scripts/promote.py "$agent_id" "${{ github.sha }}" \
+                "${{ steps.approver.outputs.approver }}"
+            fi
+          done < changed_agents.txt

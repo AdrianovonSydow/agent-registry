@@ -1,0 +1,46 @@
+# agents/risk-summarizer-v1/agent.yaml
+#
+# This file is the single source of truth for this agent's behavior.
+# Any change to it must go through a pull request and human approval
+# before it can be promoted (see scripts/promote.py and the GitHub
+# Actions workflow). Do not edit a running agent's config anywhere
+# except here.
+
+agent_id: risk-summarizer-v1
+owner: avonsydow
+description: >
+  Summarizes IT/OT risk register entries from eramba into a
+  plain-language weekly digest for non-technical stakeholders.
+status: draft   # draft | approved | active | deprecated
+
+model:
+  provider: litellm
+  name: claude-sonnet
+  temperature: 0.2
+  max_tokens: 1500
+
+system_prompt: |
+  You are a risk communication assistant for a pharmaceutical
+  GRC team. You summarize structured risk register entries into
+  clear, non-technical language for stakeholders who are not
+  security or compliance specialists.
+
+  Rules:
+  - Never invent a risk, score, or mitigation that is not present
+    in the input data.
+  - Always state the risk's current status and owner.
+  - Flag any risk with no assigned owner as a gap, do not omit it.
+  - Keep each summary under 150 words.
+
+tools:
+  - name: eramba_risk_query
+    type: mcp
+    description: Read-only query access to the eramba risk register API.
+
+knowledge:
+  - none
+
+human_approval_required: true   # any output that triggers an external
+                                 # action must pause for approval;
+                                 # this agent only summarizes, so this
+                                 # exists for future agents that act.

@@ -1,0 +1,190 @@
+{
+  "name": "Agent Registry - Promotion via Polling",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Schedule (every 5 min)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Get Last Checked Timestamp",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [420, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT value FROM ops.poll_state WHERE key = 'agent_registry_last_merged_at';"
+      },
+      "credentials": {
+        "postgres": { "id": "REPLACE_WITH_CREDENTIAL_ID", "name": "Postgres - audit_promoter" }
+      }
+    },
+    {
+      "id": "3",
+      "name": "Get Recently Closed PRs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [640, 300],
+      "parameters": {
+        "url": "https://api.github.com/repos/REPLACE_OWNER/REPLACE_REPO/pulls",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "state", "value": "closed" },
+            { "name": "base", "value": "main" },
+            { "name": "sort", "value": "updated" },
+            { "name": "direction", "value": "desc" },
+            { "name": "per_page", "value": "30" }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "githubApi": { "id": "REPLACE_WITH_CREDENTIAL_ID", "name": "GitHub - agent registry read" }
+      }
+    },
+    {
+      "id": "4",
+      "name": "Filter Newly Merged",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300],
+      "parameters": {
+        "jsCode": "// Only keep PRs that: actually merged (not just closed), merged after\n// the last timestamp we processed, and merged into main (already\n// filtered by the API query, double-checked here defensively).\nconst lastCheckedRow = $('Get Last Checked Timestamp').first();\nconst lastChecked = new Date(lastCheckedRow.json.value);\n\nconst prs = $input.all().map(i => i.json);\nconst newlyMerged = prs.filter(pr =>\n  pr.merged_at !== null &&\n  new Date(pr.merged_at) > lastChecked &&\n  pr.base.ref === 'main'\n);\n\nif (newlyMerged.length === 0) {\n  return []; // nothing new -- downstream nodes simply won't run\n}\n\nreturn newlyMerged.map(pr => ({\n  json: {\n    repo_full_name: pr.base.repo.full_name,\n    pr_number: pr.number,\n    merge_commit_sha: pr.merge_commit_sha,\n    merged_at: pr.merged_at\n  }\n}));\n"
+      }
+    },
+    {
+      "id": "5",
+      "name": "Get Changed Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1080, 300],
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $json.repo_full_name }}/pulls/{{ $json.pr_number }}/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "options": {}
+      },
+      "credentials": {
+        "githubApi": { "id": "REPLACE_WITH_CREDENTIAL_ID", "name": "GitHub - agent registry read" }
+      }
+    },
+    {
+      "id": "6",
+      "name": "Filter Changed agent.yaml Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 300],
+      "parameters": {
+        "jsCode": "// Re-attach PR context to each matching file, since the files\n// endpoint response doesn't carry it.\nconst prCtxList = $('Filter Newly Merged').all().map(i => i.json);\n\nconst results = [];\nfor (const item of $input.all()) {\n  const filename = item.json.filename;\n  const match = filename.match(/^agents\\/([a-z0-9-]+)\\/agent\\.yaml$/);\n  if (!match) continue;\n\n  // Find which PR this file result belongs to by matching against\n  // the pairedItem index n8n tracks automatically.\n  const prCtx = prCtxList[item.pairedItem.item];\n  results.push({\n    json: {\n      agent_id: match[1],\n      filename,\n      repo_full_name: prCtx.repo_full_name,\n      pr_number: prCtx.pr_number,\n      merge_commit_sha: prCtx.merge_commit_sha,\n      merged_at: prCtx.merged_at\n    }\n  });\n}\nreturn results;\n"
+      }
+    },
+    {
+      "id": "7",
+      "name": "Get PR Reviews",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1520, 300],
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $json.repo_full_name }}/pulls/{{ $json.pr_number }}/reviews",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "options": {}
+      },
+      "credentials": {
+        "githubApi": { "id": "REPLACE_WITH_CREDENTIAL_ID", "name": "GitHub - agent registry read" }
+      }
+    },
+    {
+      "id": "8",
+      "name": "Pick Latest Approver",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1740, 300],
+      "parameters": {
+        "jsCode": "const reviews = $input.all().map(i => i.json);\nconst approvals = reviews.filter(r => r.state === 'APPROVED');\nif (approvals.length === 0) {\n  throw new Error('No approved review found on this PR -- refusing to promote an unapproved merge');\n}\napprovals.sort((a, b) => new Date(b.submitted_at) - new Date(a.submitted_at));\nconst approver = approvals[0].user.login;\n\nconst ctx = $('Filter Changed agent.yaml Files').first().json;\nreturn [{ json: { ...ctx, approver } }];\n"
+      }
+    },
+    {
+      "id": "9",
+      "name": "Get File Content At Merge Commit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1960, 300],
+      "parameters": {
+        "url": "=https://raw.githubusercontent.com/{{ $json.repo_full_name }}/{{ $json.merge_commit_sha }}/agents/{{ $json.agent_id }}/agent.yaml",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "options": { "response": { "response": { "responseFormat": "text" } } }
+      },
+      "credentials": {
+        "githubApi": { "id": "REPLACE_WITH_CREDENTIAL_ID", "name": "GitHub - agent registry read" }
+      }
+    },
+    {
+      "id": "10",
+      "name": "Compute Content Hash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2180, 300],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst ctx = $('Pick Latest Approver').first().json;\nconst content = $input.first().json.data || $input.first().json;\nconst hash = crypto.createHash('sha256').update(content, 'utf8').digest('hex');\n\nreturn [{\n  json: {\n    agent_id: ctx.agent_id,\n    git_commit: ctx.merge_commit_sha,\n    content_hash: hash,\n    approver: ctx.approver,\n    raw_content: content,\n    merged_at: ctx.merged_at\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "11",
+      "name": "Insert agent_versions Row",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [2400, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit.agent_versions (agent_id, git_commit, content_hash, approver, raw_content)\nVALUES ($1, $2, $3, $4, $5)\nON CONFLICT (agent_id, content_hash) DO NOTHING\nRETURNING version_id, agent_id, content_hash;",
+        "options": {
+          "queryReplacement": "={{ [$json.agent_id, $json.git_commit, $json.content_hash, $json.approver, $json.raw_content] }}"
+        }
+      },
+      "credentials": {
+        "postgres": { "id": "REPLACE_WITH_CREDENTIAL_ID", "name": "Postgres - audit_promoter" }
+      }
+    },
+    {
+      "id": "12",
+      "name": "Update Last Checked Timestamp",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [2620, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE ops.poll_state SET value = $1, updated_at = clock_timestamp() WHERE key = 'agent_registry_last_merged_at';",
+        "options": {
+          "queryReplacement": "={{ [ Math.max(...$('Filter Newly Merged').all().map(i => new Date(i.json.merged_at).getTime())) ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": { "id": "REPLACE_WITH_CREDENTIAL_ID", "name": "Postgres - audit_promoter" }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule (every 5 min)": { "main": [[{ "node": "Get Last Checked Timestamp", "type": "main", "index": 0 }]] },
+    "Get Last Checked Timestamp": { "main": [[{ "node": "Get Recently Closed PRs", "type": "main", "index": 0 }]] },
+    "Get Recently Closed PRs": { "main": [[{ "node": "Filter Newly Merged", "type": "main", "index": 0 }]] },
+    "Filter Newly Merged": { "main": [[{ "node": "Get Changed Files", "type": "main", "index": 0 }]] },
+    "Get Changed Files": { "main": [[{ "node": "Filter Changed agent.yaml Files", "type": "main", "index": 0 }]] },
+    "Filter Changed agent.yaml Files": { "main": [[{ "node": "Get PR Reviews", "type": "main", "index": 0 }]] },
+    "Get PR Reviews": { "main": [[{ "node": "Pick Latest Approver", "type": "main", "index": 0 }]] },
+    "Pick Latest Approver": { "main": [[{ "node": "Get File Content At Merge Commit", "type": "main", "index": 0 }]] },
+    "Get File Content At Merge Commit": { "main": [[{ "node": "Compute Content Hash", "type": "main", "index": 0 }]] },
+    "Compute Content Hash": { "main": [[{ "node": "Insert agent_versions Row", "type": "main", "index": 0 }]] },
+    "Insert agent_versions Row": { "main": [[{ "node": "Update Last Checked Timestamp", "type": "main", "index": 0 }]] }
+  }
+}
